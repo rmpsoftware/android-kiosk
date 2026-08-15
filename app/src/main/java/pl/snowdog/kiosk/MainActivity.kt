@@ -95,6 +95,26 @@ class MainActivity : AppCompatActivity() {
         binding.txtUrl.editText?.setText(url)
         val pin = sharedPref.getString(getString(R.string.pin_key), "")
         binding.txtPin.editText?.setText(pin)
+        val allowedOrigin = sharedPref.getString(
+            getString(R.string.allowed_origin_key),
+            KioskSecurity.originOf(url) ?: "https://app.example.com"
+        )
+        binding.txtAllowedOrigin.editText?.setText(allowedOrigin)
+        binding.txtKioskToken.editText?.setText(
+            sharedPref.getString(getString(R.string.kiosk_token_key), "")
+        )
+        binding.txtKioskLocation.editText?.setText(
+            sharedPref.getString(getString(R.string.kiosk_location_key), "")
+        )
+        binding.txtPrinterHost.editText?.setText(
+            sharedPref.getString(getString(R.string.printer_host_key), "")
+        )
+        binding.txtPrinterPort.editText?.setText(
+            sharedPref.getInt(getString(R.string.printer_port_key), 9100).toString()
+        )
+        binding.cbDiagnosticMode.isChecked = sharedPref.getBoolean(
+            getString(R.string.diagnostic_mode_key), false
+        )
         val autostart = sharedPref.getBoolean(getString(R.string.autostart), false)
         binding.cbKioskAutostart.isChecked = autostart
 
@@ -287,6 +307,12 @@ class MainActivity : AppCompatActivity() {
     private fun setKioskPolicies(enable: Boolean, isAdmin: Boolean) {
         var url = binding.txtUrl.editText?.text.toString()
         val pin = binding.txtPin.editText?.text.toString()
+        var allowedOrigin = binding.txtAllowedOrigin.editText?.text.toString()
+        val kioskToken = binding.txtKioskToken.editText?.text.toString().trim()
+        val kioskLocation = binding.txtKioskLocation.editText?.text.toString().trim()
+        val printerHost = binding.txtPrinterHost.editText?.text.toString().trim()
+        val printerPort = binding.txtPrinterPort.editText?.text.toString().toIntOrNull()
+        val diagnosticMode = binding.cbDiagnosticMode.isChecked
 
         if (enable) {
             if (url.trim() == "") {
@@ -301,6 +327,28 @@ class MainActivity : AppCompatActivity() {
                 url = "https://$url"
             } else if (!url.startsWith("https")) {
                 url = url.replace("http", "https")
+            }
+
+            val normalizedOrigin = KioskSecurity.normalizeHttpsOrigin(allowedOrigin)
+            if (normalizedOrigin == null || (!diagnosticMode && !KioskSecurity.isAllowedUrl(url, normalizedOrigin))) {
+                showValidationError(R.string.url_wrong, R.id.txtAllowedOrigin)
+                return
+            }
+            allowedOrigin = normalizedOrigin
+            if (!diagnosticMode && (
+                    kioskToken.length < 20 ||
+                        kioskLocation.isBlank() ||
+                        !KioskSecurity.isValidPrinterHost(printerHost) ||
+                        printerPort == null ||
+                        !KioskSecurity.isValidPrinterPort(printerPort)
+                    )
+            ) {
+                Toast.makeText(
+                    this,
+                    "Kiosk-Token, Standort und Drucker-Konfiguration prüfen.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
             }
         }
 
@@ -319,6 +367,12 @@ class MainActivity : AppCompatActivity() {
         sharedPref.edit(commit = true) {
             putString(getString(R.string.url_key), url)
             putString(getString(R.string.pin_key), pin)
+            putString(getString(R.string.allowed_origin_key), allowedOrigin)
+            putString(getString(R.string.kiosk_token_key), kioskToken)
+            putString(getString(R.string.kiosk_location_key), kioskLocation)
+            putString(getString(R.string.printer_host_key), printerHost)
+            putInt(getString(R.string.printer_port_key), printerPort ?: 9100)
+            putBoolean(getString(R.string.diagnostic_mode_key), diagnosticMode)
         }
 
         if (enable) {

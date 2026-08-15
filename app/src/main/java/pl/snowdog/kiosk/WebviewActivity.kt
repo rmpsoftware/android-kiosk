@@ -9,6 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.http.SslError
@@ -24,6 +25,9 @@ import android.text.TextWatcher
 import android.view.View
 import android.view.WindowManager
 import android.webkit.SslErrorHandler
+import android.webkit.PermissionRequest
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -31,6 +35,8 @@ import android.widget.EditText
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.edit
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -49,22 +55,31 @@ class WebviewActivity : AppCompatActivity() {
     private lateinit var sharedPref: SharedPreferences
     private lateinit var binding: ActivityMainBinding
     private var pin: String? = null
+    private var diagnosticMode: Boolean = false
+    private var allowedOrigin: String = ""
+    private var printBridge: GuestRegistrationBridge? = null
+    @Volatile private var bridgePageAllowed: Boolean = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_webview)
         binding = ActivityMainBinding.inflate(layoutInflater)
 
-        val defaultUrl = "https://on-system.net"
+        val defaultUrl = "https://app.example.com/kiosk"
         sharedPref =
             getSharedPreferences(getString(R.string.storage_key), Context.MODE_PRIVATE) ?: return
         val url = sharedPref.getString(getString(R.string.url_key), defaultUrl)
         pin = sharedPref.getString(getString(R.string.pin_key), "1234")
+        diagnosticMode = sharedPref.getBoolean(getString(R.string.diagnostic_mode_key), false)
+        allowedOrigin = KioskSecurity.normalizeHttpsOrigin(
+            sharedPref.getString(getString(R.string.allowed_origin_key), null)
+        ) ?: ""
 
         initVars()
         setKioskPolicies(isAdmin())
         showInFullScreen(findViewById(R.id.root))
         setupWebView(url ?: defaultUrl)
+        requestCameraPermission()
         listenToConnectionChange()
         initSwipe()
 
@@ -247,6 +262,8 @@ class WebviewActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        printBridge?.shutdown()
+        webView.removeJavascriptInterface(GuestRegistrationBridge.INTERFACE_NAME)
         if (::reloadOnConnected.isInitialized)
             reloadOnConnected.onActivityDestroy()
         super.onDestroy()
@@ -285,10 +302,32 @@ class WebviewActivity : AppCompatActivity() {
     private fun listenToConnectionChange() = reloadOnConnected.onActivityCreate(this)
 
     private fun setupWebView(url: String) {
+        val bridgeConfig = loadBridgeConfig()
+        webView.removeJavascriptInterface(GuestRegistrationBridge.INTERFACE_NAME)
+        if (!diagnosticMode && bridgeConfig != null) {
+            printBridge = GuestRegistrationBridge(webView, bridgeConfig) { bridgePageAllowed }
+            webView.addJavascriptInterface(printBridge!!, GuestRegistrationBridge.INTERFACE_NAME)
+        }
         webView.webViewClient = object : WebViewClient() {
+
+            @Suppress("DEPRECATION")
+            override fun shouldOverrideUrlLoading(view: WebView?, url: String?): Boolean {
+                if (diagnosticMode) return false
+                return !KioskSecurity.isAllowedUrl(url, allowedOrigin)
+            }
+
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                if (diagnosticMode) return false
+                return !KioskSecurity.isAllowedUrl(request?.url?.toString(), allowedOrigin)
+            }
 
             override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
                 super.onPageStarted(view, url, favicon)
+                bridgePageAllowed = !diagnosticMode && KioskSecurity.isAllowedUrl(url, allowedOrigin)
+                if (!diagnosticMode && !bridgePageAllowed) {
+                    view?.stopLoading()
+                    return
+                }
                 if (!swipeRefreshLayout.isRefreshing) swipeRefreshLayout.isRefreshing = true
             }
 
@@ -309,13 +348,29 @@ class WebviewActivity : AppCompatActivity() {
             }
 
             override fun onReceivedSslError(view: WebView?, handler: SslErrorHandler?, error: SslError?) {
-                // If you proceed, still make sure the spinner stops in case the page bails out
-                handler?.proceed()
+                if (diagnosticMode) handler?.proceed() else handler?.cancel()
                 swipeRefreshLayout.isRefreshing = false
             }
         }
 
         webView.webChromeClient = object : WebChromeClient(){
+            override fun onPermissionRequest(request: PermissionRequest?) {
+                val cameraAllowed = request != null &&
+                    KioskSecurity.isAllowedUrl(request.origin?.toString(), allowedOrigin) &&
+                    ContextCompat.checkSelfPermission(
+                        this@WebviewActivity,
+                        android.Manifest.permission.CAMERA
+                    ) == PackageManager.PERMISSION_GRANTED
+                val videoRequested = request?.resources?.contains(
+                    PermissionRequest.RESOURCE_VIDEO_CAPTURE
+                ) == true
+                if (cameraAllowed && videoRequested) {
+                    request.grant(arrayOf(PermissionRequest.RESOURCE_VIDEO_CAPTURE))
+                } else {
+                    request?.deny()
+                }
+            }
+
             override fun onProgressChanged(view: WebView?, newProgress: Int) {
                 super.onProgressChanged(view, newProgress)
                 if (newProgress == 100)
@@ -329,18 +384,61 @@ class WebviewActivity : AppCompatActivity() {
             javaScriptEnabled = true
             domStorageEnabled = true
             useWideViewPort = true
-            userAgentString =
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/37.0.2049.0 Safari/537.36"
+            userAgentString = "${userAgentString} OPR-Guest-Kiosk/${BuildConfig.VERSION_NAME}"
             loadWithOverviewMode = true
             setSupportZoom(true)
             builtInZoomControls = true
             displayZoomControls = false
-            allowFileAccess = true
-            allowContentAccess = true
+            allowFileAccess = false
+            allowContentAccess = false
+            allowFileAccessFromFileURLs = false
+            allowUniversalAccessFromFileURLs = false
+            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+            mediaPlaybackRequiresUserGesture = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) safeBrowsingEnabled = true
         }
         webView.scrollBarStyle = WebView.SCROLLBARS_OUTSIDE_OVERLAY
         webView.isScrollbarFadingEnabled = false
         webView.loadUrl(url)
+    }
+
+    private fun loadBridgeConfig(): GuestRegistrationKioskConfig? {
+        if (allowedOrigin.isBlank()) return null
+        val token = sharedPref.getString(getString(R.string.kiosk_token_key), "")?.trim().orEmpty()
+        val locationId = sharedPref.getString(
+            getString(R.string.kiosk_location_key), ""
+        )?.trim().orEmpty()
+        val printerHost = sharedPref.getString(
+            getString(R.string.printer_host_key), ""
+        )?.trim().orEmpty()
+        val printerPort = sharedPref.getInt(getString(R.string.printer_port_key), 9100)
+        if (
+            token.length < 20 ||
+            locationId.isBlank() ||
+            !KioskSecurity.isValidPrinterHost(printerHost) ||
+            !KioskSecurity.isValidPrinterPort(printerPort)
+        ) return null
+        return GuestRegistrationKioskConfig(
+            allowedOrigin = allowedOrigin,
+            kioskToken = token,
+            locationId = locationId,
+            deviceName = Build.MODEL,
+            printerHost = printerHost,
+            printerPort = printerPort,
+        )
+    }
+
+    private fun requestCameraPermission() {
+        if (
+            ContextCompat.checkSelfPermission(this, android.Manifest.permission.CAMERA) !=
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(android.Manifest.permission.CAMERA),
+                4101,
+            )
+        }
     }
 
     private fun initVars() {

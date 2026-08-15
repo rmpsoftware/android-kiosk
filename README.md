@@ -27,6 +27,22 @@ adb install path/to/kiosk.apk
 adb shell dpm set-device-owner pl.snowdog.kiosk/.MyDeviceAdminReceiver
 ```
 
+## Advanced configuration and printing function
+
+- allowed origin: the matching bare HTTPS origin, without a path
+- kiosk token and location: for authorization against the backend 
+- printer host and port: the PDF-capable printer, normally port `9100`
+
+In normal mode the WebView rejects certificate errors and top-level navigation
+outside the configured origin. JavaScript can only pass a print-job UUID to the
+native printer bridge; the app downloads the PDF from the configured backend and
+validates its content type, signature and size before sending it to the configured
+printer. In Unsafe mode relaxes WebView TLS/origin checks but disables the native
+bridge completely.
+
+The app requests camera permission for QR scanning. A real device and printer are
+required to accept camera selection, offline/timeout behavior and raw-PDF printing.
+
 ## Usefull commands
 
 `adb` command location `$HOME/Android/Sdk/platform-tools/adb`

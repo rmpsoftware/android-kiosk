@@ -19,4 +19,16 @@
     <string name="audio_volume">AUDIO_VOLUME</string>
     <string name="reload_time">RELOAD_TIME</string>
     <string name="reload_time_hint">Reload Time HH:MM</string>
+    <string name="allowed_origin_key">ALLOWED_ORIGIN</string>
+    <string name="allowed_origin_hint">Erlaubte Web-Origin (HTTPS)</string>
+    <string name="kiosk_token_key">KIOSK_TOKEN</string>
+    <string name="kiosk_token_hint">Kiosk-Geräte-Token</string>
+    <string name="kiosk_location_key">KIOSK_LOCATION</string>
+    <string name="kiosk_location_hint">Kiosk-Standort-ID</string>
+    <string name="printer_host_key">PRINTER_HOST</string>
+    <string name="printer_host_hint">Drucker-IP / Hostname</string>
+    <string name="printer_port_key">PRINTER_PORT</string>
+    <string name="printer_port_hint">Drucker-Port</string>
+    <string name="diagnostic_mode_key">DIAGNOSTIC_MODE</string>
+    <string name="diagnostic_mode">Unsafe-Mode (Printerbridge deaktiviert)</string>
 </resources>
