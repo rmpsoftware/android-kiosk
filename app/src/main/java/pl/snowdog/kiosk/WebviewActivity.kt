@@ -3,7 +3,6 @@ package pl.snowdog.kiosk
 import android.app.AlertDialog
 import android.app.ComponentCaller
 import android.app.admin.DevicePolicyManager
-import android.app.admin.SystemUpdatePolicy
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -69,7 +68,15 @@ class WebviewActivity : AppCompatActivity() {
         sharedPref =
             getSharedPreferences(getString(R.string.storage_key), Context.MODE_PRIVATE) ?: return
         val url = sharedPref.getString(getString(R.string.url_key), defaultUrl)
-        pin = sharedPref.getString(getString(R.string.pin_key), "1234")
+        pin = sharedPref.getString(getString(R.string.pin_key), null)
+        if (pin.isNullOrBlank()) {
+            // No PIN set (e.g. after a PIN reset): never fall back to a default PIN,
+            // send the user to the settings page instead.
+            sharedPref.edit(commit = true) { putBoolean(getString(R.string.edit_key), true) }
+            startActivity(Intent(applicationContext, MainActivity::class.java))
+            finish()
+            return
+        }
         diagnosticMode = sharedPref.getBoolean(getString(R.string.diagnostic_mode_key), false)
         allowedOrigin = KioskSecurity.normalizeHttpsOrigin(
             sharedPref.getString(getString(R.string.allowed_origin_key), null)
@@ -140,8 +147,7 @@ class WebviewActivity : AppCompatActivity() {
         builder.setView(input)
 
         builder.setPositiveButton(android.R.string.yes) { _, _ ->
-            val inputPin = input.text.toString().toInt()
-            if (inputPin == pin?.toInt()) {
+            if (input.text.toString() == pin) {
                 RefreshScheduler.cancel(this.applicationContext)
                 goToHome()
             } else {
@@ -201,13 +207,6 @@ class WebviewActivity : AppCompatActivity() {
                     or BatteryManager.BATTERY_PLUGGED_WIRELESS).toString()
         )
 
-    private fun setUpdatePolicy() {
-        mDevicePolicyManager.setSystemUpdatePolicy(
-            adminComponentName,
-            SystemUpdatePolicy.createWindowedInstallPolicy(60, 120)
-        )
-    }
-
     private fun setRestrictions() {
         setUserRestriction(UserManager.DISALLOW_SAFE_BOOT)
         setUserRestriction(UserManager.DISALLOW_FACTORY_RESET)
@@ -221,7 +220,6 @@ class WebviewActivity : AppCompatActivity() {
         if (isAdmin) {
             setRestrictions()
             enableStayOnWhilePluggedIn()
-            setUpdatePolicy()
             setAsHomeApp()
             setKeyGuardEnabled()
         }

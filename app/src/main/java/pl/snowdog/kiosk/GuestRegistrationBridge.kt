@@ -30,6 +30,7 @@ class GuestRegistrationBridge(
 ) {
     companion object {
         const val INTERFACE_NAME = "GuestRegistrationKiosk"
+        private const val TEST_JOB = "test"
         private const val MAX_PDF_BYTES = 10 * 1024 * 1024
     }
 
@@ -39,6 +40,8 @@ class GuestRegistrationBridge(
         .connectTimeout(5, TimeUnit.SECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .callTimeout(30, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
         .build()
 
     @JavascriptInterface
@@ -57,20 +60,50 @@ class GuestRegistrationBridge(
             notifyPage(jobId, "FAILED", "invalid_print_request")
             return
         }
+        enqueue(jobId, "/api/kiosk/print-jobs/$jobId/pdf")
+    }
+
+    @JavascriptInterface
+    fun getPrinterInfo(): String {
+        if (!currentPageAllowed()) return "{}"
+        return JSONObject()
+            .put("host", config.printerHost)
+            .put("port", config.printerPort)
+            .put("dpi", ZplBadge.DPI)
+            .put("widthDots", ZplBadge.widthDots)
+            .put("lengthDots", ZplBadge.lengthDots)
+            .toString()
+    }
+
+    @JavascriptInterface
+    fun testPrint() {
+        if (currentPageAllowed()) enqueue(TEST_JOB, "/api/kiosk/test-print/pdf")
+    }
+
+    private fun enqueue(jobId: String, pdfPath: String) {
         if (!activeJobs.add(jobId)) return
         executor.execute {
             var status = "FAILED"
             var error: String? = null
+            var phase = "PDF-Abruf"
             try {
-                val pdf = downloadPdf(jobId)
-                sendToPrinter(pdf)
+                if (jobId == TEST_JOB) notifyPage(jobId, "RUNNING", null, phase)
+                val pdf = downloadPdf(pdfPath)
+                phase = "Rasterung"
+                if (jobId == TEST_JOB) notifyPage(jobId, "RUNNING", null, "${pdf.size} Byte PDF geladen. Besucherausweis wird gerastert.")
+                val zpl = ZplBadge.render(webView.context.cacheDir, pdf)
+                phase = "TCP-Versand"
+                if (jobId == TEST_JOB) notifyPage(jobId, "RUNNING", null, "${zpl.size} Byte ZPL gerastert. Sende an den Drucker.")
+                sendToPrinter(zpl)
                 status = "PRINTED"
             } catch (exception: Exception) {
-                error = exception.message?.take(200) ?: exception.javaClass.simpleName
+                val reason = exception.message?.take(160) ?: exception.javaClass.simpleName
+                error = "$phase: $reason"
+            } finally {
+                if (jobId != TEST_JOB) runCatching { reportResult(jobId, status, error) }
+                activeJobs.remove(jobId)
+                notifyPage(jobId, status, error)
             }
-            runCatching { reportResult(jobId, status, error) }
-            notifyPage(jobId, status, error)
-            activeJobs.remove(jobId)
         }
     }
 
@@ -82,9 +115,9 @@ class GuestRegistrationBridge(
 
     private fun currentPageAllowed(): Boolean = isPageAllowed()
 
-    private fun downloadPdf(jobId: String): ByteArray {
+    private fun downloadPdf(path: String): ByteArray {
         val request = Request.Builder()
-            .url("${config.allowedOrigin}/api/kiosk/print-jobs/$jobId/pdf")
+            .url(config.allowedOrigin + path)
             .header("x-kiosk-token", config.kioskToken)
             .header("Accept", "application/pdf")
             .get()
@@ -114,12 +147,12 @@ class GuestRegistrationBridge(
         }
     }
 
-    private fun sendToPrinter(pdf: ByteArray) {
+    private fun sendToPrinter(zpl: ByteArray) {
         Socket().use { socket ->
             socket.connect(InetSocketAddress(config.printerHost, config.printerPort), 5_000)
             socket.soTimeout = 15_000
             socket.getOutputStream().use { output ->
-                output.write(pdf)
+                output.write(zpl)
                 output.flush()
             }
         }
@@ -138,11 +171,12 @@ class GuestRegistrationBridge(
         }
     }
 
-    private fun notifyPage(jobId: String, status: String, error: String?) {
+    private fun notifyPage(jobId: String, status: String, error: String?, progress: String? = null) {
         val detail = JSONObject()
             .put("jobId", jobId)
             .put("status", status)
             .put("error", error)
+            .put("progress", progress)
             .toString()
         webView.post {
             if (currentPageAllowed()) {

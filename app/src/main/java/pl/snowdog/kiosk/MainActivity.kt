@@ -4,41 +4,30 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.app.TimePickerDialog
 import android.app.admin.DevicePolicyManager
-import android.app.admin.SystemUpdatePolicy
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.SharedPreferences
 import android.media.AudioManager
-import android.net.Uri
 import android.os.BatteryManager
-import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.UserManager
 import android.provider.Settings
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
-import android.widget.Button
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.coordinatorlayout.widget.CoordinatorLayout
-import androidx.core.content.FileProvider
 import androidx.core.content.edit
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.updatePadding
 import com.google.android.material.snackbar.Snackbar
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.Response
-import okio.IOException
-import org.json.JSONObject
 import pl.snowdog.kiosk.databinding.ActivityMainBinding
-import java.io.File
 import java.util.Calendar
 import kotlin.system.exitProcess
 
@@ -50,11 +39,6 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private lateinit var sharedPref: SharedPreferences
 
-    private var latestVersion: String? = null
-    private var updateUrl = "https://kiosk.neoli.ms"
-    private var updateVersionJsonUrl = "$updateUrl/version.json"
-    private var downloadUrl = "$updateUrl/primus-kiosk-{x.y.z}.apk"
-
     private lateinit var audioManager: AudioManager
 
     companion object {
@@ -65,6 +49,17 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        // targetSdk 35 enforces edge-to-edge: keep the form clear of system bars and the keyboard
+        ViewCompat.setOnApplyWindowInsetsListener(binding.nestedScrollView) { v, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or
+                    WindowInsetsCompat.Type.displayCutout() or
+                    WindowInsetsCompat.Type.ime()
+            )
+            v.updatePadding(left = bars.left, top = bars.top, right = bars.right, bottom = bars.bottom)
+            insets
+        }
 
         mAdminComponentName = MyDeviceAdminReceiver.getComponentName(this)
         mDevicePolicyManager =
@@ -83,18 +78,11 @@ class MainActivity : AppCompatActivity() {
     private fun init() {
 //        mDevicePolicyManager.removeActiveAdmin(mAdminComponentName)
 
-        checkForUpdate(binding.btnUpdate, updateVersionJsonUrl, BuildConfig.VERSION_NAME )
-        { latest ->
-            // Optional: change label or set click to start your update flow
-            // findViewById<Button>(R.id.btnUpdate).text = "Update to $latest"
-            binding.btnUpdate.text = "Update to $latest"
-            latestVersion = latest
-        }
-
         val url = sharedPref.getString(getString(R.string.url_key), "")
         binding.txtUrl.editText?.setText(url)
         val pin = sharedPref.getString(getString(R.string.pin_key), "")
         binding.txtPin.editText?.setText(pin)
+        binding.txtPinConfirm.editText?.setText(pin)
         val allowedOrigin = sharedPref.getString(
             getString(R.string.allowed_origin_key),
             KioskSecurity.originOf(url) ?: "https://app.example.com"
@@ -260,12 +248,6 @@ class MainActivity : AppCompatActivity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
         })
 
-        binding.btnUpdate.setOnClickListener {
-            if (!latestVersion.isNullOrEmpty()){
-                startUpdateFlow(downloadUrl.replace("{x.y.z}", latestVersion!!))
-            }
-        }
-
         binding.sbAudioVolume.addOnChangeListener { _, value, _ ->
             audioManager.setStreamVolume(
                 AudioManager.STREAM_MUSIC,
@@ -307,12 +289,19 @@ class MainActivity : AppCompatActivity() {
     private fun setKioskPolicies(enable: Boolean, isAdmin: Boolean) {
         var url = binding.txtUrl.editText?.text.toString()
         val pin = binding.txtPin.editText?.text.toString()
+        val pinConfirm = binding.txtPinConfirm.editText?.text.toString()
         var allowedOrigin = binding.txtAllowedOrigin.editText?.text.toString()
         val kioskToken = binding.txtKioskToken.editText?.text.toString().trim()
         val kioskLocation = binding.txtKioskLocation.editText?.text.toString().trim()
         val printerHost = binding.txtPrinterHost.editText?.text.toString().trim()
         val printerPort = binding.txtPrinterPort.editText?.text.toString().toIntOrNull()
         val diagnosticMode = binding.cbDiagnosticMode.isChecked
+
+        // The PIN is saved below in both cases, so never store a mistyped one
+        if (pin != pinConfirm) {
+            showValidationError(R.string.pin_mismatch, R.id.txtPinConfirm)
+            return
+        }
 
         if (enable) {
             if (url.trim() == "") {
@@ -355,7 +344,6 @@ class MainActivity : AppCompatActivity() {
         if (isAdmin) {
             setRestrictions(enable)
             enableStayOnWhilePluggedIn(enable)
-            setUpdatePolicy(enable)
             setAsHomeApp(enable)
             setKeyGuardEnabled(enable)
         }
@@ -430,17 +418,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun setUpdatePolicy(enable: Boolean) {
-        if (enable) {
-            mDevicePolicyManager.setSystemUpdatePolicy(
-                mAdminComponentName,
-                SystemUpdatePolicy.createWindowedInstallPolicy(60, 120)
-            )
-        } else {
-            mDevicePolicyManager.setSystemUpdatePolicy(mAdminComponentName, null)
-        }
-    }
-
     private fun setAsHomeApp(enable: Boolean) {
         if (enable) {
             val intentFilter = IntentFilter(Intent.ACTION_MAIN).apply {
@@ -479,168 +456,6 @@ class MainActivity : AppCompatActivity() {
             window.decorView.systemUiVisibility = flags
         }
     }
-
-    /**
-     * Fetches a JSON with { "version": "x.y.z" } and shows the button if a newer version exists.
-     *
-     * @param updateButton The button to show/hide.
-     * @param versionUrl   Your backend endpoint (e.g., https://example.com/app/latest.json).
-     * @param currentVersion Your app's current version (e.g., BuildConfig.VERSION_NAME).
-     * @param onNewVersion Optional callback with the latest version when available.
-     */
-    fun checkForUpdate(
-        updateButton: Button,
-        versionUrl: String,
-        currentVersion: String,
-        onNewVersion: ((String) -> Unit)? = null
-    ) {
-        updateButton.visibility = View.GONE
-
-        val client = OkHttpClient()
-        val req = Request.Builder().url(versionUrl).get().build()
-
-        client.newCall(req).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
-                // You might log this or ignore silently.
-            }
-
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                response.use {
-                    if (!it.isSuccessful) return
-
-                    val body = it.body?.string() ?: return
-                    val latest = try {
-                        JSONObject(body).getString("version")
-                    } catch (_: Exception) { return }
-
-                    val hasUpdate = compareVersions(latest, currentVersion) > 0
-
-                    updateButton.post {
-                        updateButton.visibility = if (hasUpdate) View.VISIBLE else View.GONE
-                        if (hasUpdate) onNewVersion?.invoke(latest)
-                    }
-                }
-            }
-        })
-    }
-
-    /**
-     * Compares semantic-ish versions like "1.2.10" vs "1.3".
-     * Returns >0 if a>b, 0 if equal, <0 if a<b.
-     */
-    fun compareVersions(a: String, b: String): Int {
-        val asParts = a.split('.', '-', '_')
-        val bsParts = b.split('.', '-', '_')
-        val max = maxOf(asParts.size, bsParts.size)
-
-        for (i in 0 until max) {
-            val ai = asParts.getOrNull(i)?.toIntOrNull() ?: 0
-            val bi = bsParts.getOrNull(i)?.toIntOrNull() ?: 0
-            if (ai != bi) return ai - bi
-        }
-        return 0
-    }
-
-    fun startUpdateFlow(apkUrl: String) {
-        pendingAfterUnknownSources = { downloadAndInstallApk(apkUrl) }
-        ensureCanInstallUnknownSources { downloadAndInstallApk(apkUrl) }
-    }
-
-    fun downloadAndInstallApk(url: String) {
-        val last = Uri.parse(url).lastPathSegment ?: "update.apk"
-        val fileName = if (last.endsWith(".apk", ignoreCase = true)) last else "update.apk"
-
-        // nuke any stale file
-        val dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)!!
-        File(dir, fileName).apply { if (exists()) delete() }
-
-        downloadWithOkHttpAndInstall(url)
-    }
-
-    private fun downloadWithOkHttpAndInstall(url: String) {
-        val client = OkHttpClient()
-        val req = Request.Builder()
-            .url(url)
-            .header("Accept-Encoding", "identity") // avoid gzip for APKs
-            .build()
-
-        client.newCall(req).enqueue(object : Callback {
-            override fun onFailure(call: Call, e: IOException) {
-                runOnUiThread {
-                    Toast.makeText(this@MainActivity, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
-                }
-            }
-            override fun onResponse(call: Call, response: Response) {
-                response.use { resp ->
-                    if (!resp.isSuccessful || resp.body == null) return@use
-                    val target = File(getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), "update.apk")
-                    target.parentFile?.mkdirs()
-                    target.outputStream().use { out -> resp.body!!.byteStream().copyTo(out) }
-
-                    val apkUri = FileProvider.getUriForFile(
-                        this@MainActivity, "$packageName.fileprovider", target
-                    )
-                    runOnUiThread { installApk(this@MainActivity, apkUri) }
-                }
-            }
-        })
-    }
-
-    private fun installApk(context: Context, apkUri: Uri) {
-        val installIntent = Intent(Intent.ACTION_VIEW).apply {
-            setDataAndType(apkUri, "application/vnd.android.package-archive")
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        }
-
-        // Verify we can handle the intent
-        if (installIntent.resolveActivity(context.packageManager) != null) {
-            try {
-                context.startActivity(installIntent)
-            } catch (e: Exception) {
-                Toast.makeText(context, "Unable to open installer: ${e.message}", Toast.LENGTH_LONG).show()
-            }
-        } else {
-            Toast.makeText(context, "No installer available.", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    // Somewhere in an Activity or a class with an Activity reference
-    private fun ensureCanInstallUnknownSources(onReady: () -> Unit) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            onReady()
-            return
-        }
-
-        val canInstall = packageManager.canRequestPackageInstalls()
-        if (canInstall) {
-            onReady()
-        } else {
-            // Ask the user to allow it for this app
-            val intent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:$packageName")
-            )
-            // After user comes back, try again
-            unknownSourcesResult.launch(intent)
-        }
-    }
-
-    private val unknownSourcesResult =
-        registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            // User returned from Settings. Try again or handle denial.
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
-                packageManager.canRequestPackageInstalls()
-            ) {
-                // Continue the flow you wanted (e.g., start download)
-                pendingAfterUnknownSources?.invoke()
-                pendingAfterUnknownSources = null
-            } else {
-                Toast.makeText(this, "Can't install without permission.", Toast.LENGTH_LONG).show()
-            }
-        }
-
-    private var pendingAfterUnknownSources: (() -> Unit)? = null
 
 
 }
